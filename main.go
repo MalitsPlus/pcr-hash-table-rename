@@ -20,7 +20,7 @@ var generateHashJson bool
 
 var originalDBMap = map[string][][]string{}
 var hashedDBMap = map[string][][]string{}
-var tableMapping = map[string]string{}
+var tableMapping = map[string]map[string]string{}
 var filterTables = map[string]struct{}{}
 
 var numericRegex = regexp.MustCompile(`^\d+(\.\d+)?$`)
@@ -81,17 +81,23 @@ func run(originalDBPath string, hashedDBPath string, generatedDBPath string, gen
 		log.Fatal(err)
 	}
 
-	for t, v := range originalDBMap {
+	for intactTableName, v := range originalDBMap {
 		if filter != "" {
-			if _, ok := filterTables[t]; !ok {
+			if _, ok := filterTables[intactTableName]; !ok {
 				continue
 			}
 		}
-		if hashedTable, ok := findMatchingTable(v, hashedDB, t); ok {
-			tableMapping[t] = hashedTable
-			copyData(originalDB, hashedDB, newDB, t, hashedTable)
+		if hashedTableName, ok := findMatchingTable(v, hashedDB, intactTableName); ok {
+			// TODO: add column mappings
+			innerMap := map[string]string{
+				"--table_name": intactTableName,
+			}
+			generateColumnsMap(hashedDB, hashedTableName, originalDB, intactTableName, &innerMap)
+			tableMapping[hashedTableName] = innerMap
+
+			copyData(originalDB, hashedDB, newDB, intactTableName, hashedTableName)
 		} else {
-			log.Println("no matching table for", t)
+			log.Println("no matching table for", intactTableName)
 		}
 	}
 
@@ -100,6 +106,37 @@ func run(originalDBPath string, hashedDBPath string, generatedDBPath string, gen
 	}
 
 	log.Println("Done!")
+}
+
+func generateColumnsMap(
+	hashedDB *sql.DB,
+	hashedTableName string,
+	intactDB *sql.DB,
+	intactTableName string,
+	inTableMap *map[string]string,
+) {
+	getCols := func(db *sql.DB, tableName string) []string {
+		query := fmt.Sprintf("SELECT * FROM %s LIMIT 1", tableName)
+		rows, err := db.Query(query)
+		if err != nil {
+			log.Fatalf("Error querying database in table %s: %v", tableName, err)
+		}
+		defer rows.Close()
+		cols, err := rows.Columns()
+		if err != nil {
+			log.Fatalf("Error getting columns in table %s: %v", hashedTableName, err)
+		}
+		return cols
+	}
+
+	hashedCols := getCols(hashedDB, hashedTableName)
+	intactCols := getCols(intactDB, intactTableName)
+	if len(hashedCols) != len(intactCols) {
+		log.Fatalf("Table %q and Table %q get different amount of columns.", hashedTableName, intactTableName)
+	}
+	for i, key := range hashedCols {
+		(*inTableMap)[key] = intactCols[i]
+	}
 }
 
 func readFromDB(db *sql.DB, dbMap map[string][][]string, filterV1Table bool) {
@@ -146,7 +183,7 @@ func findMatchingTable(values [][]string, hashedDB *sql.DB, table string) (strin
 	if len(values) == 0 {
 		return "", false
 	}
-	for t, v := range hashedDBMap {
+	for hashedTableName, v := range hashedDBMap {
 		if len(v) == 0 {
 			continue
 		}
@@ -154,12 +191,12 @@ func findMatchingTable(values [][]string, hashedDB *sql.DB, table string) (strin
 			// these 2 tables have the same data but different number of rows
 			// looks like unit_unique_equip is deprecated and there are only 183 rows
 			if table == "unit_unique_equipment" || table == "unit_unique_equip" {
-				rowsCount := countRowsInTable(hashedDB, t)
+				rowsCount := countRowsInTable(hashedDB, hashedTableName)
 				if (table == "unit_unique_equipment" && rowsCount < 200) || (table == "unit_unique_equip" && rowsCount > 200) {
 					continue
 				}
 			}
-			return t, true
+			return hashedTableName, true
 		}
 	}
 
